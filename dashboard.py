@@ -18,6 +18,7 @@ from app.services.preflight_manager import format_preflight_report
 from app.services.server_diagnostics import format_server_diagnostics
 from app.services.maintenance_manager import list_backups, run_maintenance, format_maintenance_report
 from app.services.metadata_manager import ensure_metadata_templates, templates_to_text, text_to_templates
+from app.services.media_pipeline import prepare_loop_video
 from app.ui.youtube_page import render as render_youtube_page
 
 
@@ -656,11 +657,42 @@ with tab_visuals:
     )
 
     if uploaded_video:
-        for file in uploaded_video:
-            save_uploaded_file(file, library.loop_videos_dir)
+        prepared_count = 0
+        failed_files = []
 
-        st.success("Видео загружено.")
-        st.rerun()
+        with st.spinner("Загрузка и подготовка видео..."):
+            for file in uploaded_video:
+                try:
+                    source_path = save_uploaded_file(
+                        file,
+                        library.loop_videos_dir,
+                    )
+                    result = prepare_loop_video(
+                        selected_channel,
+                        source_path,
+                    )
+
+                    if result.get("ok", False):
+                        prepared_count += 1
+                    else:
+                        failed_files.append(
+                            f"{file.name}: {result.get('error', 'неизвестная ошибка')}"
+                        )
+                except Exception as exc:
+                    failed_files.append(f"{file.name}: {exc}")
+
+        if prepared_count:
+            st.success(
+                f"Видео загружено и подготовлено: {prepared_count}."
+            )
+
+        if failed_files:
+            st.error(
+                "Не удалось подготовить некоторые видео:\n\n"
+                + "\n".join(f"- {item}" for item in failed_files)
+            )
+        else:
+            st.rerun()
 
     for file in loop_videos:
         st.markdown("---")
