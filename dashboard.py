@@ -213,7 +213,18 @@ def delete_channel(channel):
 
 def save_uploaded_file(uploaded_file, target_dir):
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / uploaded_file.name
+
+    original_name = Path(uploaded_file.name).name
+    original_path = Path(original_name)
+    stem = original_path.stem
+    suffix = original_path.suffix
+
+    target_path = target_dir / original_name
+    counter = 2
+
+    while target_path.exists():
+        target_path = target_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
 
     with open(target_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
@@ -650,10 +661,16 @@ with tab_music:
 with tab_visuals:
     st.subheader("Видео для эфира")
 
+    video_uploader_version = st.session_state.get(
+        "video_uploader_version",
+        0,
+    )
+
     uploaded_video = st.file_uploader(
         "Загрузить видео",
         type=["mp4", "mov", "webm", "mkv"],
         accept_multiple_files=True,
+        key=f"video_uploader_{video_uploader_version}",
     )
 
     if uploaded_video:
@@ -692,6 +709,9 @@ with tab_visuals:
                 + "\n".join(f"- {item}" for item in failed_files)
             )
         else:
+            st.session_state["video_uploader_version"] = (
+                video_uploader_version + 1
+            )
             st.rerun()
 
     for file in loop_videos:
