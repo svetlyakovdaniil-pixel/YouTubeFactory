@@ -25,6 +25,7 @@ from app.services.maintenance_manager import (
     format_cleanup_report,
     run_cycle_maintenance,
 )
+from app.youtube.live_stream import YouTubeLiveStream
 from app.youtube.publish import Publisher
 
 
@@ -33,16 +34,14 @@ RUNTIME_DIR = PROJECT_ROOT / "runtime"
 
 MAX_AUTO_RECOVERY_ATTEMPTS = 3
 AUTO_RECOVERY_DELAY_SECONDS = 15
-STABLE_STREAM_SECONDS = 300
+START_CONFIRM_SECONDS = 20
 CYCLE_BARRIER_TIMEOUT_SECONDS = 180
 CYCLE_BARRIER_POLL_SECONDS = 2
 
 
 def log(message):
     print(message, flush=True)
-
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
     with open(LOG_FILE, "a", encoding="utf-8") as file:
         file.write(message + "\n")
 
@@ -67,6 +66,16 @@ def set_state(channel, **kwargs):
     library.save_state(state)
 
 
+def clear_event_state(channel):
+    set_state(
+        channel,
+        broadcast_id="",
+        stream_id="",
+        rtmp_url="",
+        stream_key="",
+    )
+
+
 def reset_state(channel):
     set_state(
         channel,
@@ -78,17 +87,27 @@ def reset_state(channel):
     )
 
 
+def safe_runtime_name(channel):
+    return str(channel).replace("/", "_")
+
+
+def cycle_waiting_marker(channel):
+    return RUNTIME_DIR / f"{safe_runtime_name(channel)}.cycle_waiting"
+
+
+def clear_cycle_marker(channel):
+    try:
+        cycle_waiting_marker(channel).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def pause_channel(channel, error):
     flag = RUNTIME_DIR / f"{channel}.running"
-
     if flag.exists():
         flag.unlink()
 
-    waiting_marker = cycle_waiting_marker(channel)
-
-    if waiting_marker.exists():
-        waiting_marker.unlink()
-
+    clear_cycle_marker(channel)
     set_state(
         channel,
         running=False,
@@ -100,8 +119,17 @@ def pause_channel(channel, error):
         last_error=error[-2000:],
     )
 
-    advice_text = format_advice(error)
+    if "автоматические попытки исчерпаны" in error.lower():
+        notify_error(
+            channel,
+            "Автоматические попытки восстановления исчерпаны.\n\n"
+            "Канал остановлен и больше не создаёт новые трансляции.\n\n"
+            "Требуется ручная проверка причины в панели управления.\n\n"
+            f"Технические детали:\n{error[-1200:]}",
+        )
+        return
 
+    advice_text = format_advice(error)
     notify_error(
         channel,
         "Канал остановлен и ожидает вашего вмешательства.\n\n"
@@ -111,80 +139,37 @@ def pause_channel(channel, error):
 
 
 def clear_pause(channel):
-    set_state(
-        channel,
-        paused=False,
-        last_error="",
-    )
-
-
-def safe_runtime_name(channel):
-    return str(channel).replace("/", "_")
-
-
-def cycle_waiting_marker(channel):
-    return (
-        RUNTIME_DIR
-        / f"{safe_runtime_name(channel)}.cycle_waiting"
-    )
+    set_state(channel, paused=False, last_error="")
 
 
 def active_channel_names():
-    names = []
-
-    for path in RUNTIME_DIR.glob("*.running"):
-        names.append(path.name[:-len(".running")])
-
-    return sorted(names)
+    return sorted(
+        path.name[:-len(".running")]
+        for path in RUNTIME_DIR.glob("*.running")
+    )
 
 
 def all_active_channels_waiting():
     active = active_channel_names()
-
     if not active:
         return True
-
-    for channel in active:
-        if not cycle_waiting_marker(channel).exists():
-            return False
-
-    return True
+    return all(cycle_waiting_marker(name).exists() for name in active)
 
 
 def wait_for_cycle_barrier(channel):
     marker = cycle_waiting_marker(channel)
     marker.write_text(now_iso(), encoding="utf-8")
-
     deadline = time.monotonic() + CYCLE_BARRIER_TIMEOUT_SECONDS
 
     while time.monotonic() < deadline:
         if all_active_channels_waiting():
-            return {
-                "ok": True,
-                "timed_out": False,
-            }
-
+            return {"ok": True, "timed_out": False}
         time.sleep(CYCLE_BARRIER_POLL_SECONDS)
 
     if not active_ffmpeg_processes():
-        return {
-            "ok": True,
-            "timed_out": True,
-        }
+        return {"ok": True, "timed_out": True}
 
-    return {
-        "ok": False,
-        "timed_out": True,
-    }
-
-
-def clear_cycle_marker(channel):
-    marker = cycle_waiting_marker(channel)
-
-    try:
-        marker.unlink()
-    except FileNotFoundError:
-        pass
+    return {"ok": False, "timed_out": True}
 
 
 def run_between_streams_maintenance(channel):
@@ -192,14 +177,12 @@ def run_between_streams_maintenance(channel):
 
     if not barrier.get("ok"):
         clear_cycle_marker(channel)
-
         event(
             channel,
             "warning",
             "Очистка между эфирами пропущена: другой канал ещё транслирует",
             barrier,
         )
-
         return {
             "ok": False,
             "skipped": True,
@@ -207,7 +190,6 @@ def run_between_streams_maintenance(channel):
         }
 
     result = run_cycle_maintenance()
-
     event(
         channel,
         "info",
@@ -219,41 +201,81 @@ def run_between_streams_maintenance(channel):
         notify_info(
             channel,
             format_cleanup_report(result)
-            + "\n\n"
-            "После очистки будет создан следующий эфир.",
+            + "\n\nПосле очистки будет создан следующий эфир.",
         )
 
     clear_cycle_marker(channel)
-
     return result
+
+
+def confirm_ffmpeg_started(ffmpeg_process, flag):
+    deadline = time.monotonic() + START_CONFIRM_SECONDS
+    while time.monotonic() < deadline:
+        if not flag.exists() or not ffmpeg_process.is_running():
+            return False
+        time.sleep(1)
+    return ffmpeg_process.is_running()
+
+
+def persist_event_state(channel, stream_event):
+    set_state(
+        channel,
+        broadcast_id=stream_event.get("broadcast_id", ""),
+        stream_id=stream_event.get("stream_id", ""),
+        rtmp_url=stream_event.get("rtmp_url", ""),
+        stream_key=stream_event.get("stream_key", ""),
+        watch_url=stream_event.get("watch_url", ""),
+    )
+
+
+def cleanup_upcoming_event(channel, stream_event):
+    if not stream_event or not stream_event.get("broadcast_id"):
+        return None
+
+    try:
+        result = YouTubeLiveStream(channel).delete_if_upcoming(
+            stream_event["broadcast_id"]
+        )
+        event(
+            channel,
+            "info",
+            "Проверка незапущенной YouTube-трансляции",
+            result,
+        )
+        return result
+    except Exception as exc:
+        event(
+            channel,
+            "warning",
+            "Не удалось удалить незапущенную YouTube-трансляцию",
+            {
+                "broadcast_id": stream_event.get("broadcast_id", ""),
+                "error": str(exc),
+            },
+        )
+        return None
 
 
 def run(channel):
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-
     flag = RUNTIME_DIR / f"{channel}.running"
 
     log(f"===== Radio Worker started: {channel} =====")
     event(channel, "info", "Воркер запущен")
     clear_pause(channel)
+    clear_event_state(channel)
 
     library = ChannelLibrary(channel)
     radio = RadioService(channel)
     publisher = Publisher()
-
-    auto_recovery_attempt = 0
-    recovering = False
+    live = YouTubeLiveStream(channel)
 
     while flag.exists():
+        stream_event = None
+
         try:
             config = library.get_config()
-
-            duration_hours = int(
-                config.get(
-                    "stream_duration_hours",
-                    12,
-                )
-            )
+            duration_hours = int(config.get("stream_duration_hours", 12))
 
             set_state(
                 channel,
@@ -262,44 +284,20 @@ def run(channel):
                 last_error="",
             )
 
-            event(
-                channel,
-                "info",
-                "Preflight Check перед запуском",
-            )
-
+            event(channel, "info", "Preflight Check перед запуском")
             assert_preflight_ok(channel)
+            event(channel, "success", "Preflight Check пройден")
 
-            event(
-                channel,
-                "success",
-                "Preflight Check пройден",
-            )
-
-            event(
-                channel,
-                "info",
-                "Сборка плейлиста",
-            )
-
+            event(channel, "info", "Сборка плейлиста")
             playlist = radio.build_playlist()
-
             event(
                 channel,
                 "info",
                 "Плейлист готов",
                 {
-                    "tracks": len(
-                        playlist.get("tracks", [])
-                    ),
-                    "total_seconds": playlist.get(
-                        "total_seconds",
-                        0,
-                    ),
-                    "target_seconds": playlist.get(
-                        "target_seconds",
-                        0,
-                    ),
+                    "tracks": len(playlist.get("tracks", [])),
+                    "total_seconds": playlist.get("total_seconds", 0),
+                    "target_seconds": playlist.get("target_seconds", 0),
                 },
             )
 
@@ -310,260 +308,209 @@ def run(channel):
             event(
                 channel,
                 "info",
-                "Выбраны название и описание эфира",
-                {
-                    "title": title,
-                    "description": description,
-                },
+                "Создание единственной YouTube-трансляции текущего цикла",
+                {"title": title},
             )
 
-            event(
-                channel,
-                "info",
-                (
-                    "Создание YouTube Live после автовосстановления"
-                    if recovering
-                    else "Создание YouTube Live"
-                ),
-                {
-                    "recovery_attempt": (
-                        auto_recovery_attempt
-                        if recovering
-                        else 0
-                    )
-                },
-            )
-
-            result = publisher.publish_radio(
+            stream_event = publisher.create_radio_event(
                 channel_name=channel,
-                playlist=playlist,
                 title=title,
                 description=description,
             )
+            persist_event_state(channel, stream_event)
 
-            set_state(
-                channel,
-                running=True,
-                paused=False,
-                watch_url=result["watch_url"],
-                started_at=now_iso(),
-                current_track=playlist["tracks"][0]["title"],
-                track_index=1,
-                last_error="",
-            )
+            auto_recovery_attempt = 0
+            first_start = True
 
-            event(
-                channel,
-                "success",
-                (
-                    "Эфир автоматически восстановлен"
-                    if recovering
-                    else "Эфир успешно запущен"
-                ),
-                {
-                    "watch_url": result["watch_url"],
-                    "current_track": playlist["tracks"][0]["title"],
-                    "thumbnail_path": result.get(
-                        "thumbnail_path",
-                        "",
-                    ),
-                    "duration_seconds": result.get(
-                        "duration_seconds",
-                        0,
-                    ),
-                    "recovery_attempt": (
-                        auto_recovery_attempt
-                        if recovering
-                        else 0
-                    ),
-                },
-            )
-
-            if recovering:
-                notify_info(
-                    channel,
-                    "✅ Трансляция автоматически восстановлена.\n\n"
-                    "Ваше участие не потребовалось.\n\n"
-                    f"{result['watch_url']}",
-                )
-                recovering = False
-            else:
-                notify_info(
-                    channel,
-                    "✅ Эфир успешно запущен.\n\n"
-                    f"{result['watch_url']}",
+            while flag.exists():
+                result = publisher.start_radio_ffmpeg(
+                    channel_name=channel,
+                    playlist=playlist,
+                    event=stream_event,
                 )
 
-            engine = result["ffmpeg_engine"]
-            ffmpeg_process = result["ffmpeg_process"]
+                engine = result["ffmpeg_engine"]
+                ffmpeg_process = result["ffmpeg_process"]
+                confirmed = confirm_ffmpeg_started(ffmpeg_process, flag)
 
-            ffmpeg_result = (
-                engine.wait_until_finished_or_flag_removed(
+                if confirmed:
+                    set_state(
+                        channel,
+                        running=True,
+                        paused=False,
+                        watch_url=stream_event["watch_url"],
+                        started_at=now_iso(),
+                        current_track=playlist["tracks"][0]["title"],
+                        track_index=1,
+                        last_error="",
+                    )
+
+                    if first_start:
+                        notify_info(
+                            channel,
+                            "✅ Эфир успешно запущен и стабильно работает.\n\n"
+                            f"{stream_event['watch_url']}",
+                        )
+                    else:
+                        notify_info(
+                            channel,
+                            "✅ RTMP-поток восстановлен в той же трансляции.\n\n"
+                            "Новая YouTube-трансляция не создавалась.\n\n"
+                            f"{stream_event['watch_url']}",
+                        )
+
+                    event(
+                        channel,
+                        "success",
+                        (
+                            "Эфир стабильно запущен"
+                            if first_start
+                            else "RTMP восстановлен в существующей трансляции"
+                        ),
+                        {
+                            "broadcast_id": stream_event["broadcast_id"],
+                            "watch_url": stream_event["watch_url"],
+                            "attempt": auto_recovery_attempt,
+                        },
+                    )
+                    first_start = False
+
+                ffmpeg_result = engine.wait_until_finished_or_flag_removed(
                     ffmpeg_process,
                     flag,
                     tick_seconds=1,
                 )
-            )
-
-            event(
-                channel,
-                (
-                    "info"
-                    if ffmpeg_result.ok
-                    else "warning"
-                ),
-                "FFmpeg завершил работу",
-                {
-                    "ok": ffmpeg_result.ok,
-                    "returncode": ffmpeg_result.returncode,
-                    "duration_seconds": (
-                        ffmpeg_result.duration_seconds
-                    ),
-                    "analysis": ffmpeg_result.analysis,
-                    "ffmpeg_log": ffmpeg_result.log_paths,
-                },
-            )
-
-            if not flag.exists():
-                reset_state(channel)
-                clear_cycle_marker(channel)
 
                 event(
                     channel,
-                    "info",
-                    "Эфир остановлен пользователем",
-                )
-                break
-
-            analysis = ffmpeg_result.analysis or {}
-            action = analysis.get(
-                "action",
-                "need_user",
-            )
-
-            if (
-                ffmpeg_result.duration_seconds
-                >= STABLE_STREAM_SECONDS
-            ):
-                auto_recovery_attempt = 0
-
-            if ffmpeg_result.ok:
-                reset_state(channel)
-
-                event(
-                    channel,
-                    "info",
-                    "12-часовой эфир завершён. Ожидание остальных каналов и очистка",
-                )
-
-                run_between_streams_maintenance(channel)
-
-                if not flag.exists():
-                    break
-
-                event(
-                    channel,
-                    "info",
-                    "Очистка завершена. Создаётся следующий эфир",
-                )
-
-                recovering = False
-                time.sleep(AUTO_RECOVERY_DELAY_SECONDS)
-                continue
-
-            if action == "stop":
-                reset_state(channel)
-                clear_cycle_marker(channel)
-
-                event(
-                    channel,
-                    "info",
-                    "FFmpeg остановлен штатно",
-                )
-                break
-
-            if action == "restart_broadcast":
-                auto_recovery_attempt += 1
-
-                if (
-                    auto_recovery_attempt
-                    > MAX_AUTO_RECOVERY_ATTEMPTS
-                ):
-                    raise RuntimeError(
-                        "Автоматическое восстановление не удалось после "
-                        f"{MAX_AUTO_RECOVERY_ATTEMPTS} попыток.\n\n"
-                        + format_ffmpeg_analysis(analysis)
-                        + "\n\n"
-                        + (
-                            "FFmpeg log: "
-                            f"{ffmpeg_result.log_paths.get('latest')}"
-                        )
-                    )
-
-                reset_state(channel)
-
-                set_state(
-                    channel,
-                    paused=False,
-                    last_error="",
-                )
-
-                event(
-                    channel,
-                    "warning",
-                    "Запущено автоматическое восстановление эфира",
+                    "info" if ffmpeg_result.ok else "warning",
+                    "FFmpeg завершил работу",
                     {
-                        "attempt": auto_recovery_attempt,
-                        "max_attempts": (
-                            MAX_AUTO_RECOVERY_ATTEMPTS
-                        ),
-                        "analysis": analysis,
+                        "ok": ffmpeg_result.ok,
+                        "returncode": ffmpeg_result.returncode,
+                        "duration_seconds": ffmpeg_result.duration_seconds,
+                        "analysis": ffmpeg_result.analysis,
                         "ffmpeg_log": ffmpeg_result.log_paths,
+                        "broadcast_id": stream_event["broadcast_id"],
                     },
                 )
 
-                notify_warning(
-                    channel,
-                    (
+                if not flag.exists():
+                    reset_state(channel)
+                    clear_cycle_marker(channel)
+                    cleanup_upcoming_event(channel, stream_event)
+                    clear_event_state(channel)
+                    event(channel, "info", "Эфир остановлен пользователем")
+                    break
+
+                analysis = ffmpeg_result.analysis or {}
+                action = analysis.get("action", "need_user")
+
+                if ffmpeg_result.ok:
+                    reset_state(channel)
+                    clear_event_state(channel)
+                    stream_event = None
+                    event(
+                        channel,
+                        "info",
+                        "12-часовой эфир завершён. Ожидание остальных каналов и очистка",
+                    )
+                    run_between_streams_maintenance(channel)
+                    if not flag.exists():
+                        break
+                    event(
+                        channel,
+                        "info",
+                        "Очистка завершена. Создаётся следующий эфир",
+                    )
+                    time.sleep(AUTO_RECOVERY_DELAY_SECONDS)
+                    break
+
+                if action == "stop":
+                    reset_state(channel)
+                    clear_cycle_marker(channel)
+                    cleanup_upcoming_event(channel, stream_event)
+                    clear_event_state(channel)
+                    event(channel, "info", "FFmpeg остановлен штатно")
+                    break
+
+                if action == "restart_broadcast":
+                    auto_recovery_attempt += 1
+
+                    if auto_recovery_attempt > MAX_AUTO_RECOVERY_ATTEMPTS:
+                        cleanup_upcoming_event(channel, stream_event)
+                        clear_event_state(channel)
+                        raise RuntimeError(
+                            "Автоматические попытки исчерпаны.\n\n"
+                            + format_ffmpeg_analysis(analysis)
+                            + "\n\nFFmpeg log: "
+                            + str(ffmpeg_result.log_paths.get("latest"))
+                        )
+
+                    if not live.is_event_reusable(stream_event["broadcast_id"]):
+                        cleanup_upcoming_event(channel, stream_event)
+                        clear_event_state(channel)
+                        raise RuntimeError(
+                            "Автоматические попытки исчерпаны: существующая "
+                            "YouTube-трансляция больше не допускает повторное "
+                            "подключение.\n\n"
+                            + format_ffmpeg_analysis(analysis)
+                        )
+
+                    set_state(channel, paused=False, last_error="")
+                    event(
+                        channel,
+                        "warning",
+                        "Повторный запуск FFmpeg в той же YouTube-трансляции",
+                        {
+                            "attempt": auto_recovery_attempt,
+                            "max_attempts": MAX_AUTO_RECOVERY_ATTEMPTS,
+                            "broadcast_id": stream_event["broadcast_id"],
+                            "watch_url": stream_event["watch_url"],
+                            "analysis": analysis,
+                        },
+                    )
+                    notify_warning(
+                        channel,
                         analysis.get(
                             "title",
                             "Соединение с YouTube прервано",
                         )
+                        + ".\n\n"
+                        + analysis.get("what_happened", "")
+                        + "\n\nСистема повторно подключает FFmpeg к той же "
+                        + "YouTube-трансляции.\nНовая трансляция не создаётся.\n"
+                        + f"Попытка {auto_recovery_attempt} "
+                        + f"из {MAX_AUTO_RECOVERY_ATTEMPTS}.",
                     )
-                    + ".\n\n"
-                    + analysis.get(
-                        "what_happened",
-                        "",
-                    )
-                    + "\n\n"
-                    + "Система уже создаёт новый эфир автоматически.\n"
-                    + (
-                        f"Попытка {auto_recovery_attempt} "
-                        f"из {MAX_AUTO_RECOVERY_ATTEMPTS}.\n\n"
-                    )
-                    + "Ничего делать не нужно.",
+                    time.sleep(AUTO_RECOVERY_DELAY_SECONDS)
+                    continue
+
+                cleanup_upcoming_event(channel, stream_event)
+                clear_event_state(channel)
+                raise RuntimeError(
+                    "FFmpeg failed\n\n"
+                    + format_ffmpeg_analysis(analysis)
+                    + "\n\nFFmpeg log: "
+                    + str(ffmpeg_result.log_paths.get("latest"))
                 )
 
-                recovering = True
-                time.sleep(AUTO_RECOVERY_DELAY_SECONDS)
+            if not flag.exists():
+                break
+
+            if stream_event is None:
                 continue
 
-            raise RuntimeError(
-                "FFmpeg failed\n\n"
-                + format_ffmpeg_analysis(analysis)
-                + "\n\n"
-                + (
-                    "FFmpeg log: "
-                    f"{ffmpeg_result.log_paths.get('latest')}"
-                )
-            )
+            break
 
         except Exception:
             error = traceback.format_exc()
             log(error)
 
-            advice = analyze_error(error)
+            cleanup_upcoming_event(channel, stream_event)
+            clear_event_state(channel)
 
+            advice = analyze_error(error)
             event(
                 channel,
                 "error",
@@ -571,15 +518,11 @@ def run(channel):
                 {
                     "error_title": advice["title"],
                     "what_happened": advice["what_happened"],
-                    "recommended_actions": advice[
-                        "recommended_actions"
-                    ],
+                    "recommended_actions": advice["recommended_actions"],
                     "error": error[-2000:],
                 },
             )
-
             pause_channel(channel, error)
-
             log(
                 f"[{channel}] Critical error. "
                 "Channel paused. Waiting for manual restart."
@@ -587,14 +530,9 @@ def run(channel):
             break
 
     reset_state(channel)
+    clear_event_state(channel)
     clear_cycle_marker(channel)
-
-    event(
-        channel,
-        "info",
-        "Воркер остановлен",
-    )
-
+    event(channel, "info", "Воркер остановлен")
     log(f"===== Radio Worker stopped: {channel} =====")
 
 
