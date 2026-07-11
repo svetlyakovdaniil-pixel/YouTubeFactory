@@ -1,13 +1,13 @@
 import random
 from pathlib import Path
 
+from app.services.audio_mixer import AudioMixer
 from app.services.channel_library import ChannelLibrary
 from app.services.ffmpeg_engine import FFmpegEngine
 from app.youtube.live_stream import YouTubeLiveStream
 
 
 PROJECT_ROOT = Path("/opt/youtubefactory")
-TMP_ROOT = PROJECT_ROOT / "tmp" / "radio"
 
 
 class Publisher:
@@ -34,27 +34,10 @@ class Publisher:
 
         return random.choice(valid)
 
-    def write_audio_concat(self, playlist):
-        TMP_ROOT.mkdir(parents=True, exist_ok=True)
-
-        path = TMP_ROOT / "audio_concat.txt"
-        lines = []
-
-        for track in playlist.get("tracks", []):
-            audio_path = str(track.get("path", "")).replace("'", "'\\''")
-            lines.append(f"file '{audio_path}'")
-
-        path.write_text(
-            "\n".join(lines) + "\n",
-            encoding="utf-8",
-        )
-
-        return path
-
     def build_ffmpeg_command(
         self,
         loop_video,
-        audio_concat,
+        mixed_audio,
         rtmp_url,
         duration_seconds,
     ):
@@ -75,12 +58,8 @@ class Publisher:
             "-i",
             str(loop_video),
             "-re",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
             "-i",
-            str(audio_concat),
+            str(mixed_audio),
             "-t",
             str(duration_seconds),
             "-map",
@@ -90,13 +69,7 @@ class Publisher:
             "-c:v",
             "copy",
             "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
+            "copy",
             "-f",
             "flv",
             rtmp_url,
@@ -134,6 +107,17 @@ class Publisher:
                 f"Playlist has invalid target_seconds: {duration_seconds}"
             )
 
+        mixer = AudioMixer(channel_name)
+
+        mixed_result = mixer.render(
+            playlist=playlist,
+            target_seconds=duration_seconds,
+        )
+
+        mixed_audio = Path(
+            mixed_result["output_path"]
+        )
+
         thumbnail = self.pick_thumbnail(channel_name)
 
         live = YouTubeLiveStream(channel_name)
@@ -148,11 +132,9 @@ class Publisher:
             f"{event['rtmp_url']}/{event['stream_key']}"
         )
 
-        audio_concat = self.write_audio_concat(playlist)
-
         command = self.build_ffmpeg_command(
             loop_video=loop_video,
-            audio_concat=audio_concat,
+            mixed_audio=mixed_audio,
             rtmp_url=rtmp_url,
             duration_seconds=duration_seconds,
         )
@@ -163,9 +145,13 @@ class Publisher:
             command,
             context={
                 "LOOP_VIDEO": loop_video,
-                "AUDIO_CONCAT": audio_concat,
+                "MIXED_AUDIO": mixed_audio,
                 "THUMBNAIL": thumbnail,
                 "DURATION_SECONDS": duration_seconds,
+                "CROSSFADE_SECONDS": playlist.get(
+                    "crossfade_seconds",
+                    3.0,
+                ),
             },
         )
 
@@ -173,11 +159,15 @@ class Publisher:
         event["ffmpeg_process"] = ffmpeg_process
         event["process"] = ffmpeg_process.process
         event["loop_video"] = str(loop_video)
-        event["audio_concat"] = str(audio_concat)
+        event["mixed_audio"] = str(mixed_audio)
         event["thumbnail_path"] = (
             str(thumbnail) if thumbnail else ""
         )
         event["duration_seconds"] = duration_seconds
+        event["crossfade_seconds"] = playlist.get(
+            "crossfade_seconds",
+            3.0,
+        )
         event["ffmpeg_command"] = command
 
         return event
@@ -190,7 +180,6 @@ class Publisher:
         description="",
         thumbnail_path=None,
     ):
-        # Legacy compatibility placeholder.
         live = YouTubeLiveStream(channel_name)
 
         event = live.create_live_event(
