@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>{{ title }}</title>
+
+<style>
+
+*{
+margin:0;
+padding:0;
+box-sizing:border-box;
+font-family:Segoe UI,Arial,sans-serif;
+}
+
+body{
+background:#0f172a;
+color:white;
+padding:40px;
+}
+
+h1{
+margin-bottom:35px;
+}
+
+.grid{
+display:grid;
+grid-template-columns:repeat(auto-fill,minmax(420px,1fr));
+gap:25px;
+}
+
+.card{
+
+background:#1e293b;
+
+padding:25px;
+
+border-radius:18px;
+
+border:1px solid #334155;
+
+}
+
+button{
+
+margin-top:20px;
+
+padding:14px 22px;
+
+border:none;
+
+border-radius:10px;
+
+cursor:pointer;
+
+background:#2563eb;
+
+color:white;
+
+font-size:16px;
+
+}
+
+button:hover{
+
+background:#1d4ed8;
+
+}
+
+.status{
+
+margin-top:25px;
+
+padding:18px;
+
+border-radius:12px;
+
+background:#111827;
+
+}
+
+.running{
+
+color:#facc15;
+
+}
+
+.done{
+
+color:#4ade80;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>🚀 YouTube Factory</h1>
+
+<div class="status">
+
+{% if status.running %}
+
+<h2 class="running">
+⏳ {{ status.message }}
+</h2>
+
+<p>
+
+Канал:
+<b>{{ status.channel }}</b>
+
+</p>
+
+{% else %}
+
+<h2 class="done">
+
+✅ {{ status.message }}
+
+</h2>
+
+{% endif %}
+
+</div>
+
+<br><br>
+
+<div class="grid">
+
+{% for channel in channels %}
+
+<div class="card">
+
+<h2>{{ channel.name }}</h2>
+
+<br>
+
+<p>{{ channel.description }}</p>
+
+<br>
+
+<p>
+
+<b>Музыка:</b>
+
+{{ channel.genre }}
+
+</p>
+
+<br>
+
+<form
+action="/generate/{{ channel.name }}"
+method="post"
+>
+
+<button>
+
+🎬 Создать видео
+
+</button>
+
+</form>
+
+</div>
+
+{% endfor %}
+
+</div>
+
+</body>
+
+</html>

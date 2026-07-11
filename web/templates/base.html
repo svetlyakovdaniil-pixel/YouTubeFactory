@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>{{ title }}</title>
+
+<style>
+
+*{
+margin:0;
+padding:0;
+box-sizing:border-box;
+}
+
+body{
+
+background:#0f172a;
+color:#f8fafc;
+font-family:Segoe UI,Arial,sans-serif;
+
+}
+
+.wrapper{
+
+display:flex;
+min-height:100vh;
+
+}
+
+.sidebar{
+
+width:270px;
+background:#111827;
+border-right:1px solid #1f2937;
+padding:30px;
+
+}
+
+.logo{
+
+font-size:28px;
+font-weight:bold;
+margin-bottom:40px;
+
+}
+
+.menu{
+
+display:flex;
+flex-direction:column;
+gap:10px;
+
+}
+
+.menu a{
+
+text-decoration:none;
+color:#cbd5e1;
+padding:14px 18px;
+border-radius:12px;
+
+transition:.2s;
+
+}
+
+.menu a:hover{
+
+background:#1e293b;
+
+color:white;
+
+}
+
+.content{
+
+flex:1;
+
+padding:45px;
+
+}
+
+.card{
+
+background:#1e293b;
+
+border:1px solid #334155;
+
+border-radius:20px;
+
+padding:25px;
+
+}
+
+.status{
+
+display:inline-block;
+
+margin-top:10px;
+
+padding:6px 14px;
+
+border-radius:999px;
+
+background:#14532d;
+
+color:#86efac;
+
+}
+
+button{
+
+margin-top:25px;
+
+padding:14px 22px;
+
+border:none;
+
+border-radius:12px;
+
+background:#2563eb;
+
+color:white;
+
+cursor:pointer;
+
+font-size:16px;
+
+}
+
+button:hover{
+
+background:#1d4ed8;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="wrapper">
+
+<div class="sidebar">
+
+<div class="logo">
+
+🚀 YouTube Factory
+
+</div>
+
+<div class="menu">
+
+<a href="/">🏠 Главная</a>
+
+<a href="#">📺 Каналы</a>
+
+<a href="#">🛰 Источники</a>
+
+<a href="#">🎵 Музыка</a>
+
+<a href="#">🎬 Видео</a>
+
+<a href="#">☁ Генерация AI</a>
+
+<a href="#">📤 YouTube</a>
+
+<a href="#">🕒 Планировщик</a>
+
+<a href="#">📋 Очередь</a>
+
+<a href="#">📜 Журнал</a>
+
+<a href="#">⚙ Настройки</a>
+
+</div>
+
+</div>
+
+<div class="content">
+
+{% block content %}
+
+{% endblock %}
+
+</div>
+
+</div>
+
+</body>
+
+</html>

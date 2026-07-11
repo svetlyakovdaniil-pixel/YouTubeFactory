@@ -1,16 +1,68 @@
+# Python
 venv/
-
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+client_secret*.json
+token*.json
+oauth*.json
+youtube_auth/
+**/youtube_auth/
+secrets/
+**/secrets/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime data
 cache/
 logs/
 output/
+runtime/
+tmp/
+queue/
+archive/
+data/
 
-.env
+# Media and channel libraries
+library/
+assets/
 
-.vscode/
+# Backups and generated archives
+backup/
+backups/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
 
+# Logs and temporary downloads
 *.log
+*.tmp
+*.part
+*.crdownload
 
-.DS_Store
+# Local configuration with possible secrets
+config/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+**/.streamlit/secrets.toml
