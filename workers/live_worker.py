@@ -228,6 +228,50 @@ def persist_event_state(channel, stream_event):
     )
 
 
+def finish_youtube_event(channel, stream_event):
+    if not stream_event:
+        return None
+
+    broadcast_id = stream_event.get(
+        "broadcast_id",
+        "",
+    )
+
+    if not broadcast_id:
+        return None
+
+    try:
+        result = (
+            YouTubeLiveStream(channel)
+            .finish_broadcast(broadcast_id)
+        )
+
+        event(
+            channel,
+            "info",
+            "YouTube-трансляция корректно завершена",
+            {
+                "broadcast_id": broadcast_id,
+                "result": result,
+            },
+        )
+
+        return result
+
+    except Exception as exc:
+        event(
+            channel,
+            "warning",
+            "Не удалось завершить YouTube-трансляцию",
+            {
+                "broadcast_id": broadcast_id,
+                "error": str(exc),
+            },
+        )
+
+        return None
+
+
 def cleanup_upcoming_event(channel, stream_event):
     if not stream_event or not stream_event.get("broadcast_id"):
         return None
@@ -396,9 +440,9 @@ def run(channel):
                 )
 
                 if not flag.exists():
+                    finish_youtube_event(channel, stream_event)
                     reset_state(channel)
                     clear_cycle_marker(channel)
-                    cleanup_upcoming_event(channel, stream_event)
                     clear_event_state(channel)
                     event(channel, "info", "Эфир остановлен пользователем")
                     break
@@ -407,6 +451,7 @@ def run(channel):
                 action = analysis.get("action", "need_user")
 
                 if ffmpeg_result.ok:
+                    finish_youtube_event(channel, stream_event)
                     reset_state(channel)
                     clear_event_state(channel)
                     stream_event = None
@@ -427,9 +472,9 @@ def run(channel):
                     break
 
                 if action == "stop":
+                    finish_youtube_event(channel, stream_event)
                     reset_state(channel)
                     clear_cycle_marker(channel)
-                    cleanup_upcoming_event(channel, stream_event)
                     clear_event_state(channel)
                     event(channel, "info", "FFmpeg остановлен штатно")
                     break

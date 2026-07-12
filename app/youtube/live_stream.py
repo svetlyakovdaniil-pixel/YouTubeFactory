@@ -48,7 +48,7 @@ class YouTubeLiveStream:
                 },
                 "contentDetails": {
                     "enableAutoStart": True,
-                    "enableAutoStop": True,
+                    "enableAutoStop": False,
                     "enableDvr": True,
                     "recordFromStart": True,
                 },
@@ -106,6 +106,55 @@ class YouTubeLiveStream:
 
         self.youtube.liveBroadcasts().delete(id=broadcast_id).execute()
         return {"ok": True, "deleted": True, "status": status}
+
+    def finish_broadcast(self, broadcast_id):
+        status = self.get_lifecycle_status(broadcast_id)
+
+        if status in {"missing", "complete"}:
+            return {
+                "ok": True,
+                "action": "nothing",
+                "status": status,
+            }
+
+        if status == "live":
+            response = (
+                self.youtube
+                .liveBroadcasts()
+                .transition(
+                    part="id,status",
+                    id=broadcast_id,
+                    broadcastStatus="complete",
+                )
+                .execute()
+            )
+
+            return {
+                "ok": True,
+                "action": "completed",
+                "status": (
+                    response
+                    .get("status", {})
+                    .get("lifeCycleStatus", "")
+                ),
+            }
+
+        result = self.delete_if_upcoming(
+            broadcast_id
+        )
+
+        return {
+            "ok": True,
+            "action": (
+                "deleted"
+                if result.get("deleted")
+                else "nothing"
+            ),
+            "status": result.get(
+                "status",
+                status,
+            ),
+        }
 
     def set_thumbnail(self, broadcast_id, thumbnail_path):
         if not thumbnail_path:
