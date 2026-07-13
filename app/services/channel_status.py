@@ -1,16 +1,15 @@
+import re
 from pathlib import Path
 
 from app.services.channel_library import ChannelLibrary
+from app.youtube.health import check_youtube_connection
 
 
 PROJECT_ROOT = Path("/opt/youtubefactory")
-LIBRARY_ROOT = PROJECT_ROOT / "library"
 SYSTEMD_DIR = Path("/etc/systemd/system")
 
 
 def safe_service_slug(name):
-    import re
-
     slug = name.lower().strip()
     slug = re.sub(r"[^a-z0-9а-яё]+", "-", slug)
     slug = slug.strip("-")
@@ -21,26 +20,28 @@ def service_name(channel):
     if channel == "Cosmic Slumber":
         return "youtubefactory-radio-cosmic"
 
-    return f"youtubefactory-radio-{safe_service_slug(channel)}"
-
-
-def service_exists(channel):
-    return (SYSTEMD_DIR / f"{service_name(channel)}.service").exists()
-
-
-def runtime_flag_exists(channel):
-    return (PROJECT_ROOT / "runtime" / f"{channel}.running").exists()
-
-
-def youtube_connected(channel):
-    youtube_dir = LIBRARY_ROOT / channel / "youtube"
     return (
-        (youtube_dir / "client_secret.json").exists()
-        and (youtube_dir / "token.json").exists()
+        f"youtubefactory-radio-"
+        f"{safe_service_slug(channel)}"
     )
 
 
-def build_channel_status(channel, systemd_active=False):
+def service_exists(channel):
+    return (
+        SYSTEMD_DIR / f"{service_name(channel)}.service"
+    ).exists()
+
+
+def runtime_flag_exists(channel):
+    return (
+        PROJECT_ROOT / "runtime" / f"{channel}.running"
+    ).exists()
+
+
+def build_channel_status(
+    channel,
+    systemd_active=False,
+):
     library = ChannelLibrary(channel)
 
     config = library.get_config()
@@ -52,7 +53,10 @@ def build_channel_status(channel, systemd_active=False):
 
     music_ready = len(music_files) > 0
     video_ready = len(loop_videos) > 0
-    youtube_ready = youtube_connected(channel)
+
+    youtube_health = check_youtube_connection(channel)
+    youtube_ready = bool(youtube_health.get("ok"))
+
     service_ok = service_exists(channel)
     paused = bool(state.get("paused", False))
 
@@ -72,7 +76,7 @@ def build_channel_status(channel, systemd_active=False):
         missing.append("добавить видео")
 
     if not youtube_ready:
-        missing.append("подключить YouTube")
+        missing.append("переподключить YouTube")
 
     if not service_ok:
         missing.append("восстановить systemd-сервис")
@@ -94,13 +98,13 @@ def build_channel_status(channel, systemd_active=False):
     )
 
     if paused:
-        status_label = "🛑 Требуется вмешательство"
+        status_label = "Требуется вмешательство"
         status_kind = "paused"
     elif effectively_running:
-        status_label = "🟢 Эфир запущен"
+        status_label = "Эфир запущен"
         status_kind = "running"
     else:
-        status_label = "🔴 Эфир остановлен"
+        status_label = "Эфир остановлен"
         status_kind = "stopped"
 
     return {
@@ -113,6 +117,7 @@ def build_channel_status(channel, systemd_active=False):
         "music_ready": music_ready,
         "video_ready": video_ready,
         "youtube_ready": youtube_ready,
+        "youtube_health": youtube_health,
         "service_ok": service_ok,
         "paused": paused,
         "effectively_running": effectively_running,
