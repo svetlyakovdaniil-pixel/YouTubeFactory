@@ -11,6 +11,7 @@ import streamlit as st
 from app.services.channel_library import ChannelLibrary
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.channel_status import build_channel_status
+from app.services.channel_control import stop_channel_fully
 from app.services.event_log import read_events, clear_events
 from app.services.error_advisor import analyze_error, format_advice
 from app.services.recovery_manager import recover_channel, format_recovery_report
@@ -97,7 +98,13 @@ def start_channel(channel):
 
 
 def stop_channel(channel):
-    return run_cmd(["systemctl", "stop", service_name(channel)])
+    result = stop_channel_fully(channel)
+
+    return (
+        result.get("code", 1),
+        result.get("stdout", ""),
+        result.get("stderr", ""),
+    )
 
 
 def disable_channel(channel):
@@ -573,7 +580,10 @@ with col_control:
                 code, stdout, stderr = stop_channel(selected_channel)
 
                 if code == 0:
-                    st.success("Эфир остановлен.")
+                    st.success(
+                        stdout
+                        or "Эфир полностью остановлен."
+                    )
                     st.rerun()
                 else:
                     st.error(stderr or stdout)
