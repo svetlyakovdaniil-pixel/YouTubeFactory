@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.youtube.auth import get_youtube_service
+from app.youtube.api_retry import safe_execute
 
 
 PROJECT_ROOT = Path("/opt/youtubefactory")
@@ -32,10 +33,15 @@ def check_youtube_connection(channel_name):
     try:
         youtube = get_youtube_service(channel_name)
 
-        response = youtube.channels().list(
+        request = youtube.channels().list(
             part="id,snippet",
             mine=True,
-        ).execute()
+        )
+
+        response = safe_execute(
+            request,
+            operation_name="Проверка подключения YouTube-канала",
+        )
 
         items = response.get("items", [])
 

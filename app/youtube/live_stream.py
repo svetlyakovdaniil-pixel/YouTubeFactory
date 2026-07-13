@@ -4,6 +4,7 @@ from pathlib import Path
 from googleapiclient.http import MediaFileUpload
 
 from app.youtube.auth import get_youtube_service
+from app.youtube.api_retry import safe_execute
 
 
 REUSABLE_BROADCAST_STATUSES = {
@@ -54,7 +55,10 @@ class YouTubeLiveStream:
                 },
             },
         )
-        return request.execute()
+        return safe_execute(
+            request,
+            operation_name="Создание YouTube broadcast",
+        )
 
     def create_stream(self, title):
         request = self.youtube.liveStreams().insert(
@@ -68,21 +72,34 @@ class YouTubeLiveStream:
                 },
             },
         )
-        return request.execute()
+        return safe_execute(
+            request,
+            operation_name="Создание YouTube stream",
+        )
 
     def bind(self, broadcast_id, stream_id):
-        return self.youtube.liveBroadcasts().bind(
+        request = self.youtube.liveBroadcasts().bind(
             part="id,contentDetails",
             id=broadcast_id,
             streamId=stream_id,
-        ).execute()
+        )
+
+        return safe_execute(
+            request,
+            operation_name="Привязка YouTube stream к broadcast",
+        )
 
     def get_broadcast(self, broadcast_id):
-        response = self.youtube.liveBroadcasts().list(
+        request = self.youtube.liveBroadcasts().list(
             part="id,snippet,status,contentDetails",
             id=broadcast_id,
             maxResults=1,
-        ).execute()
+        )
+
+        response = safe_execute(
+            request,
+            operation_name="Получение статуса YouTube broadcast",
+        )
         items = response.get("items", [])
         return items[0] if items else None
 
@@ -104,7 +121,14 @@ class YouTubeLiveStream:
         if status not in UPCOMING_BROADCAST_STATUSES:
             return {"ok": True, "deleted": False, "status": status}
 
-        self.youtube.liveBroadcasts().delete(id=broadcast_id).execute()
+        request = self.youtube.liveBroadcasts().delete(
+            id=broadcast_id,
+        )
+
+        safe_execute(
+            request,
+            operation_name="Удаление незапущенного broadcast",
+        )
         return {"ok": True, "deleted": True, "status": status}
 
     def finish_broadcast(self, broadcast_id):
@@ -118,7 +142,7 @@ class YouTubeLiveStream:
             }
 
         if status == "live":
-            response = (
+            request = (
                 self.youtube
                 .liveBroadcasts()
                 .transition(
@@ -126,7 +150,11 @@ class YouTubeLiveStream:
                     id=broadcast_id,
                     broadcastStatus="complete",
                 )
-                .execute()
+            )
+
+            response = safe_execute(
+                request,
+                operation_name="Завершение YouTube broadcast",
             )
 
             return {
@@ -179,10 +207,15 @@ class YouTubeLiveStream:
             resumable=False,
         )
 
-        return self.youtube.thumbnails().set(
+        request = self.youtube.thumbnails().set(
             videoId=broadcast_id,
             media_body=media,
-        ).execute()
+        )
+
+        return safe_execute(
+            request,
+            operation_name="Установка превью YouTube",
+        )
 
     def create_live_event(self, title, description="", thumbnail_path=None):
         broadcast = self.create_broadcast(title=title, description=description)

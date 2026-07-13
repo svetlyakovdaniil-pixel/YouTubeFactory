@@ -127,15 +127,37 @@ def analyze_ffmpeg_output(returncode, output):
         )
         return result
 
-    if "broken pipe" in lower or "error writing trailer: broken pipe" in lower:
+    rtmp_disconnect_markers = (
+        "broken pipe",
+        "error writing trailer: broken pipe",
+        "error submitting a packet to the muxer: end of file",
+        "error writing trailer: end of file",
+        "error closing file: end of file",
+        "connection reset by peer",
+    )
+
+    if any(
+        marker in lower
+        for marker in rtmp_disconnect_markers
+    ):
         result.update(
             {
-                "type": "rtmp_broken_pipe",
+                "type": "rtmp_disconnect",
                 "title": "RTMP-соединение с YouTube разорвано",
-                "what_happened": "YouTube или сеть закрыли RTMP-соединение. Медиафайлы при этом могли быть полностью исправны.",
+                "what_happened": (
+                    "YouTube или сеть закрыли RTMP-соединение. "
+                    "Аудио- и видеофайлы при этом могли быть "
+                    "полностью исправны."
+                ),
                 "recommended_actions": [
-                    "Система должна попытаться создать новый эфир автоматически.",
-                    "Если автоматическое восстановление не удалось, проверьте YouTube Live и сеть сервера.",
+                    (
+                        "Система должна повторно подключить FFmpeg "
+                        "к той же YouTube-трансляции."
+                    ),
+                    (
+                        "Если автоматическое восстановление не удалось, "
+                        "проверьте YouTube Live и сеть сервера."
+                    ),
                 ],
                 "recoverable": True,
                 "action": "restart_broadcast",
