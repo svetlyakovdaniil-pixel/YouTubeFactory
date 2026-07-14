@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import shutil
@@ -218,10 +219,81 @@ def delete_channel(channel):
         shutil.rmtree(root)
 
 
-def save_uploaded_file(uploaded_file, target_dir):
-    target_dir.mkdir(parents=True, exist_ok=True)
+def file_sha256(path):
+    digest = hashlib.sha256()
 
-    original_name = Path(uploaded_file.name).name
+    with open(path, "rb") as file:
+        while True:
+            chunk = file.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def uploaded_file_sha256(uploaded_file):
+    return hashlib.sha256(
+        bytes(uploaded_file.getbuffer())
+    ).hexdigest()
+
+
+def find_duplicate_file(uploaded_file, target_dir):
+    target_dir = Path(target_dir)
+
+    if not target_dir.exists():
+        return None
+
+    uploaded_size = int(
+        getattr(uploaded_file, "size", 0) or 0
+    )
+    uploaded_hash = uploaded_file_sha256(
+        uploaded_file
+    )
+
+    for existing_path in target_dir.iterdir():
+        if not existing_path.is_file():
+            continue
+
+        try:
+            if (
+                uploaded_size
+                and existing_path.stat().st_size
+                != uploaded_size
+            ):
+                continue
+
+            if (
+                file_sha256(existing_path)
+                == uploaded_hash
+            ):
+                return existing_path
+        except OSError:
+            continue
+
+    return None
+
+
+def save_uploaded_file(uploaded_file, target_dir):
+    target_dir = Path(target_dir)
+    target_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    duplicate = find_duplicate_file(
+        uploaded_file,
+        target_dir,
+    )
+
+    if duplicate is not None:
+        return duplicate, False
+
+    original_name = Path(
+        uploaded_file.name
+    ).name
     original_path = Path(original_name)
     stem = original_path.stem
     suffix = original_path.suffix
@@ -230,13 +302,16 @@ def save_uploaded_file(uploaded_file, target_dir):
     counter = 2
 
     while target_path.exists():
-        target_path = target_dir / f"{stem}_{counter}{suffix}"
+        target_path = (
+            target_dir
+            / f"{stem}_{counter}{suffix}"
+        )
         counter += 1
 
-    with open(target_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    with open(target_path, "wb") as file:
+        file.write(uploaded_file.getbuffer())
 
-    return target_path
+    return target_path, True
 
 
 def delete_file(path):
@@ -641,17 +716,64 @@ tab_music, tab_visuals, tab_images, tab_youtube, tab_metadata, tab_telegram, tab
 with tab_music:
     st.subheader("Музыка")
 
+    music_uploader_key = (
+        f"music_uploader_version_{selected_channel}"
+    )
+    music_uploader_version = (
+        st.session_state.get(
+            music_uploader_key,
+            0,
+        )
+    )
+
     uploaded_music = st.file_uploader(
         "Загрузить музыку",
-        type=["mp3", "wav", "m4a", "aac", "flac"],
+        type=[
+            "mp3",
+            "wav",
+            "m4a",
+            "aac",
+            "flac",
+        ],
         accept_multiple_files=True,
+        key=(
+            f"music_uploader_"
+            f"{selected_channel}_"
+            f"{music_uploader_version}"
+        ),
     )
 
     if uploaded_music:
-        for file in uploaded_music:
-            save_uploaded_file(file, library.music_dir)
+        added_count = 0
+        duplicate_count = 0
 
-        st.success("Музыка загружена.")
+        for file in uploaded_music:
+            _, created = save_uploaded_file(
+                file,
+                library.music_dir,
+            )
+
+            if created:
+                added_count += 1
+            else:
+                duplicate_count += 1
+
+        if added_count:
+            st.success(
+                f"Новых музыкальных файлов: "
+                f"{added_count}."
+            )
+
+        if duplicate_count:
+            st.info(
+                f"Пропущено существующих копий: "
+                f"{duplicate_count}."
+            )
+
+        st.session_state[
+            music_uploader_key
+        ] = music_uploader_version + 1
+
         st.rerun()
 
     for file in music_files:
@@ -671,57 +793,111 @@ with tab_music:
 with tab_visuals:
     st.subheader("Видео для эфира")
 
-    video_uploader_version = st.session_state.get(
-        "video_uploader_version",
-        0,
+    video_uploader_key = (
+        f"video_uploader_version_{selected_channel}"
+    )
+    video_uploader_version = (
+        st.session_state.get(
+            video_uploader_key,
+            0,
+        )
     )
 
     uploaded_video = st.file_uploader(
         "Загрузить видео",
-        type=["mp4", "mov", "webm", "mkv"],
+        type=[
+            "mp4",
+            "mov",
+            "webm",
+            "mkv",
+        ],
         accept_multiple_files=True,
-        key=f"video_uploader_{video_uploader_version}",
+        key=(
+            f"video_uploader_"
+            f"{selected_channel}_"
+            f"{video_uploader_version}"
+        ),
     )
 
     if uploaded_video:
         prepared_count = 0
+        repaired_existing_count = 0
+        duplicate_count = 0
         failed_files = []
 
-        with st.spinner("Загрузка и подготовка видео..."):
+        with st.spinner(
+            "Загрузка и подготовка видео..."
+        ):
             for file in uploaded_video:
                 try:
-                    source_path = save_uploaded_file(
-                        file,
-                        library.loop_videos_dir,
+                    source_path, created = (
+                        save_uploaded_file(
+                            file,
+                            library.loop_videos_dir,
+                        )
                     )
+
+                    ready_path = (
+                        library.loop_videos_ready_dir
+                        / (
+                            f"{source_path.stem}"
+                            f"_stream_ready.mp4"
+                        )
+                    )
+
+                    if not created and ready_path.exists():
+                        duplicate_count += 1
+                        continue
+
                     result = prepare_loop_video(
                         selected_channel,
                         source_path,
                     )
 
                     if result.get("ok", False):
-                        prepared_count += 1
+                        if created:
+                            prepared_count += 1
+                        else:
+                            repaired_existing_count += 1
                     else:
                         failed_files.append(
-                            f"{file.name}: {result.get('error', 'неизвестная ошибка')}"
+                            f"{file.name}: "
+                            f"{result.get('error', 'неизвестная ошибка')}"
                         )
                 except Exception as exc:
-                    failed_files.append(f"{file.name}: {exc}")
+                    failed_files.append(
+                        f"{file.name}: {exc}"
+                    )
 
         if prepared_count:
             st.success(
-                f"Видео загружено и подготовлено: {prepared_count}."
+                f"Новых видео загружено и подготовлено: "
+                f"{prepared_count}."
+            )
+
+        if repaired_existing_count:
+            st.success(
+                f"Подготовлено ранее загруженных видео: "
+                f"{repaired_existing_count}."
+            )
+
+        if duplicate_count:
+            st.info(
+                f"Пропущено полностью готовых копий: "
+                f"{duplicate_count}."
             )
 
         if failed_files:
             st.error(
-                "Не удалось подготовить некоторые видео:\n\n"
-                + "\n".join(f"- {item}" for item in failed_files)
+                "Не удалось подготовить некоторые видео:"
             )
+
+            for item in failed_files:
+                st.write(f"- {item}")
         else:
-            st.session_state["video_uploader_version"] = (
-                video_uploader_version + 1
-            )
+            st.session_state[
+                video_uploader_key
+            ] = video_uploader_version + 1
             st.rerun()
 
     for file in loop_videos:
@@ -747,17 +923,63 @@ with tab_images:
         "Рекомендуемый размер: 1280×720, формат JPG или PNG."
     )
 
+    image_uploader_key = (
+        f"image_uploader_version_{selected_channel}"
+    )
+    image_uploader_version = (
+        st.session_state.get(
+            image_uploader_key,
+            0,
+        )
+    )
+
     uploaded_images = st.file_uploader(
         "Загрузить изображения превью",
-        type=["jpg", "jpeg", "png", "webp"],
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "webp",
+        ],
         accept_multiple_files=True,
+        key=(
+            f"image_uploader_"
+            f"{selected_channel}_"
+            f"{image_uploader_version}"
+        ),
     )
 
     if uploaded_images:
-        for file in uploaded_images:
-            save_uploaded_file(file, library.images_dir)
+        added_count = 0
+        duplicate_count = 0
 
-        st.success("Изображения загружены.")
+        for file in uploaded_images:
+            _, created = save_uploaded_file(
+                file,
+                library.images_dir,
+            )
+
+            if created:
+                added_count += 1
+            else:
+                duplicate_count += 1
+
+        if added_count:
+            st.success(
+                f"Новых изображений: "
+                f"{added_count}."
+            )
+
+        if duplicate_count:
+            st.info(
+                f"Пропущено существующих копий: "
+                f"{duplicate_count}."
+            )
+
+        st.session_state[
+            image_uploader_key
+        ] = image_uploader_version + 1
+
         st.rerun()
 
     if not image_files:
