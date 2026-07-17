@@ -1,7 +1,7 @@
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -37,6 +37,8 @@ AUTO_RECOVERY_DELAY_SECONDS = 15
 START_CONFIRM_SECONDS = 20
 CYCLE_BARRIER_TIMEOUT_SECONDS = 180
 CYCLE_BARRIER_POLL_SECONDS = 2
+RESTORE_STATUS_RETRY_SECONDS = 45
+RESTORE_STATUS_POLL_SECONDS = 3
 
 
 def log(message):
@@ -48,6 +50,35 @@ def log(message):
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso(value):
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def get_cycle_deadline(started_at, duration_hours):
+    started = parse_iso(started_at)
+    if started is None:
+        return None
+    return started + timedelta(hours=int(duration_hours))
+
+
+def get_remaining_seconds(started_at, duration_hours):
+    deadline = get_cycle_deadline(started_at, duration_hours)
+    if deadline is None:
+        return 0
+    return max(0, int((deadline - datetime.now(timezone.utc)).total_seconds()))
 
 
 def event(channel, level, message, data=None):
@@ -217,15 +248,68 @@ def confirm_ffmpeg_started(ffmpeg_process, flag):
     return ffmpeg_process.is_running()
 
 
-def persist_event_state(channel, stream_event):
-    set_state(
-        channel,
-        broadcast_id=stream_event.get("broadcast_id", ""),
-        stream_id=stream_event.get("stream_id", ""),
-        rtmp_url=stream_event.get("rtmp_url", ""),
-        stream_key=stream_event.get("stream_key", ""),
-        watch_url=stream_event.get("watch_url", ""),
+def persist_event_state(channel, stream_event, started_at=None):
+    values = {
+        "broadcast_id": stream_event.get("broadcast_id", ""),
+        "stream_id": stream_event.get("stream_id", ""),
+        "rtmp_url": stream_event.get("rtmp_url", ""),
+        "stream_key": stream_event.get("stream_key", ""),
+        "watch_url": stream_event.get("watch_url", ""),
+    }
+
+    if started_at is not None:
+        values["started_at"] = started_at
+
+    set_state(channel, **values)
+
+
+def load_persisted_event(channel):
+    state = ChannelLibrary(channel).get_state()
+    required = (
+        "broadcast_id",
+        "stream_id",
+        "rtmp_url",
+        "stream_key",
+        "watch_url",
+        "started_at",
     )
+
+    if not all(state.get(key) for key in required):
+        return None
+
+    return {
+        "broadcast_id": state["broadcast_id"],
+        "stream_id": state["stream_id"],
+        "rtmp_url": state["rtmp_url"],
+        "stream_key": state["stream_key"],
+        "watch_url": state["watch_url"],
+        "thumbnail_path": state.get("thumbnail_path", ""),
+    }
+
+
+def wait_until_event_reusable(channel, broadcast_id, stop_flag):
+    live = YouTubeLiveStream(channel)
+    deadline = time.monotonic() + RESTORE_STATUS_RETRY_SECONDS
+    last_status = ""
+
+    while stop_flag.exists() and time.monotonic() < deadline:
+        try:
+            last_status = live.get_lifecycle_status(broadcast_id)
+            if last_status in {
+                "created",
+                "ready",
+                "testing",
+                "testStarting",
+                "liveStarting",
+                "live",
+            }:
+                return True, last_status
+        except Exception:
+            last_status = "api_error"
+
+        time.sleep(RESTORE_STATUS_POLL_SECONDS)
+
+    return False, last_status
 
 
 def finish_youtube_event(channel, stream_event):
@@ -307,7 +391,6 @@ def run(channel):
     log(f"===== Radio Worker started: {channel} =====")
     event(channel, "info", "Воркер запущен")
     clear_pause(channel)
-    clear_event_state(channel)
 
     library = ChannelLibrary(channel)
     radio = RadioService(channel)
@@ -345,31 +428,116 @@ def run(channel):
                 },
             )
 
-            metadata = pick_stream_metadata(channel)
-            title = metadata["title"]
-            description = metadata["description"]
+            state = library.get_state()
+            started_at = state.get("started_at", "")
+            stream_event = load_persisted_event(channel)
+            restored_existing_event = stream_event is not None
 
-            event(
-                channel,
-                "info",
-                "Создание единственной YouTube-трансляции текущего цикла",
-                {"title": title},
-            )
+            if stream_event and get_remaining_seconds(started_at, duration_hours) <= 0:
+                finish_youtube_event(channel, stream_event)
+                reset_state(channel)
+                clear_event_state(channel)
+                stream_event = None
+                started_at = ""
+                event(
+                    channel,
+                    "info",
+                    "Срок текущего эфира истёк. YouTube-трансляция завершена",
+                )
+                run_between_streams_maintenance(channel)
+                if not flag.exists():
+                    break
 
-            stream_event = publisher.create_radio_event(
-                channel_name=channel,
-                title=title,
-                description=description,
-            )
-            persist_event_state(channel, stream_event)
+            if stream_event:
+                reusable, lifecycle_status = wait_until_event_reusable(
+                    channel,
+                    stream_event["broadcast_id"],
+                    flag,
+                )
+
+                if not reusable:
+                    event(
+                        channel,
+                        "warning",
+                        "Сохранённая YouTube-трансляция недоступна для восстановления",
+                        {
+                            "broadcast_id": stream_event["broadcast_id"],
+                            "lifecycle_status": lifecycle_status,
+                            "started_at": started_at,
+                        },
+                    )
+                    clear_event_state(channel)
+                    reset_state(channel)
+                    stream_event = None
+                    started_at = ""
+                else:
+                    event(
+                        channel,
+                        "info",
+                        "Восстановление существующей YouTube-трансляции после рестарта worker",
+                        {
+                            "broadcast_id": stream_event["broadcast_id"],
+                            "watch_url": stream_event["watch_url"],
+                            "started_at": started_at,
+                            "lifecycle_status": lifecycle_status,
+                        },
+                    )
+
+            if not stream_event:
+                metadata = pick_stream_metadata(channel)
+                title = metadata["title"]
+                description = metadata["description"]
+
+                event(
+                    channel,
+                    "info",
+                    "Создание единственной YouTube-трансляции текущего цикла",
+                    {"title": title},
+                )
+
+                stream_event = publisher.create_radio_event(
+                    channel_name=channel,
+                    title=title,
+                    description=description,
+                )
+                restored_existing_event = False
+                started_at = now_iso()
+                persist_event_state(
+                    channel,
+                    stream_event,
+                    started_at=started_at,
+                )
 
             auto_recovery_attempt = 0
-            first_start = True
+            first_start = not restored_existing_event
 
             while flag.exists():
+                remaining_seconds = get_remaining_seconds(
+                    started_at,
+                    duration_hours,
+                )
+
+                if remaining_seconds <= 0:
+                    finish_youtube_event(channel, stream_event)
+                    reset_state(channel)
+                    clear_event_state(channel)
+                    stream_event = None
+                    event(
+                        channel,
+                        "info",
+                        "12-часовой эфир завершён по deadline",
+                    )
+                    run_between_streams_maintenance(channel)
+                    if flag.exists():
+                        time.sleep(AUTO_RECOVERY_DELAY_SECONDS)
+                    break
+
+                cycle_playlist = dict(playlist)
+                cycle_playlist["target_seconds"] = remaining_seconds
+
                 result = publisher.start_radio_ffmpeg(
                     channel_name=channel,
-                    playlist=playlist,
+                    playlist=cycle_playlist,
                     event=stream_event,
                 )
 
@@ -383,7 +551,6 @@ def run(channel):
                         running=True,
                         paused=False,
                         watch_url=stream_event["watch_url"],
-                        started_at=now_iso(),
                         current_track=playlist["tracks"][0]["title"],
                         track_index=1,
                         last_error="",
@@ -440,11 +607,22 @@ def run(channel):
                 )
 
                 if not flag.exists():
-                    finish_youtube_event(channel, stream_event)
-                    reset_state(channel)
+                    set_state(
+                        channel,
+                        running=False,
+                        current_track="",
+                        track_index=0,
+                    )
                     clear_cycle_marker(channel)
-                    clear_event_state(channel)
-                    event(channel, "info", "Эфир остановлен пользователем")
+                    event(
+                        channel,
+                        "info",
+                        "Воркер остановлен. Данные текущей YouTube-трансляции сохранены",
+                        {
+                            "broadcast_id": stream_event.get("broadcast_id", ""),
+                            "started_at": started_at,
+                        },
+                    )
                     break
 
                 analysis = ffmpeg_result.analysis or {}
@@ -574,8 +752,12 @@ def run(channel):
             )
             break
 
-    reset_state(channel)
-    clear_event_state(channel)
+    set_state(
+        channel,
+        running=False,
+        current_track="",
+        track_index=0,
+    )
     clear_cycle_marker(channel)
     event(channel, "info", "Воркер остановлен")
     log(f"===== Radio Worker stopped: {channel} =====")

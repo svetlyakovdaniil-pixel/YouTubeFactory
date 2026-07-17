@@ -299,3 +299,169 @@ def prepare_all_channels(force=False):
         )
 
     return results
+
+def prepare_vod_loop_video(
+    channel_name,
+    profile_key,
+    source_path,
+    force=False,
+):
+    library = ChannelLibrary(channel_name)
+    profile = ensure_stream_profile()
+
+    source_path = Path(source_path)
+    output_path = (
+        library.vod_profile_loop_videos_ready_dir(
+            profile_key
+        )
+        / output_name(source_path)
+    )
+    metadata_path = (
+        library.vod_profile_loop_videos_metadata_dir(
+            profile_key
+        )
+        / f"{source_path.name}.json"
+    )
+
+    if output_path.exists() and not force:
+        return {
+            "ok": True,
+            "skipped": True,
+            "source": str(source_path),
+            "output": str(output_path),
+            "reason": "stream_ready already exists",
+        }
+
+    source_probe = ffprobe(source_path)
+    source_stream = get_video_stream(source_probe)
+
+    if not source_stream:
+        raise RuntimeError(
+            f"No video stream found: {source_path}"
+        )
+
+    video = profile["video"]
+    width = int(video["width"])
+    height = int(video["height"])
+    fps = int(video["fps"])
+    keyframe = fps * int(
+        video.get("keyframe_seconds", 2)
+    )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    vf = (
+        f"scale={width}:{height}:"
+        "force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:"
+        "(ow-iw)/2:(oh-ih)/2,"
+        f"fps={fps},format=yuv420p"
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        str(video.get("preset", "veryfast")),
+        "-crf",
+        str(video.get("crf", 21)),
+        "-b:v",
+        str(video["bitrate"]),
+        "-maxrate",
+        str(video["maxrate"]),
+        "-bufsize",
+        str(video["bufsize"]),
+        "-r",
+        str(fps),
+        "-g",
+        str(keyframe),
+        "-keyint_min",
+        str(keyframe),
+        "-sc_threshold",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    result = run_cmd(cmd)
+
+    if result.returncode != 0:
+        write_metadata(
+            metadata_path,
+            {
+                "ok": False,
+                "source": str(source_path),
+                "output": str(output_path),
+                "cmd": cmd,
+                "stderr": result.stderr[-4000:],
+                "stdout": result.stdout[-4000:],
+            },
+        )
+        raise RuntimeError(
+            result.stderr[-4000:]
+            or result.stdout[-4000:]
+        )
+
+    output_probe = ffprobe(output_path)
+    metadata = {
+        "ok": True,
+        "source": str(source_path),
+        "output": str(output_path),
+        "profile": profile,
+        "source_probe": source_probe,
+        "output_probe": output_probe,
+    }
+    write_metadata(metadata_path, metadata)
+
+    return {
+        "ok": True,
+        "skipped": False,
+        "source": str(source_path),
+        "output": str(output_path),
+        "metadata": str(metadata_path),
+    }
+
+
+def prepare_vod_profile_loop_videos(
+    channel_name,
+    profile_key,
+    force=False,
+):
+    library = ChannelLibrary(channel_name)
+    results = []
+
+    for source in (
+        library.list_vod_original_loop_videos(
+            profile_key
+        )
+    ):
+        if "stream_ready" in source.parts:
+            continue
+
+        results.append(
+            prepare_vod_loop_video(
+                channel_name=channel_name,
+                profile_key=profile_key,
+                source_path=source,
+                force=force,
+            )
+        )
+
+    return results
+

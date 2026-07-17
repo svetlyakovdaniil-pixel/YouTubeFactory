@@ -58,47 +58,77 @@ def clear_local_event_state(channel):
     library.save_state(state)
 
 
-def finish_active_broadcasts(channel):
-    broadcast_ids = list_active_broadcast_ids(
-        channel
+def has_complete_persisted_event(state):
+    required = (
+        "broadcast_id",
+        "stream_id",
+        "rtmp_url",
+        "stream_key",
+        "watch_url",
+        "started_at",
     )
+    return all(state.get(key) for key in required)
 
+
+def finish_broadcast_ids(channel, broadcast_ids):
     live = YouTubeLiveStream(channel)
     results = []
 
     for broadcast_id in broadcast_ids:
-        result = live.finish_broadcast(
-            broadcast_id
-        )
+        result = live.finish_broadcast(broadcast_id)
 
         results.append(
             {
                 "broadcast_id": broadcast_id,
-                "action": result.get(
-                    "action",
-                    "nothing",
-                ),
-                "status": result.get(
-                    "status",
-                    "",
-                ),
+                "action": result.get("action", "nothing"),
+                "status": result.get("status", ""),
             }
         )
 
-    clear_local_event_state(channel)
-
     return results
 
+
+def prepare_for_worker_start(channel):
+    library = ChannelLibrary(channel)
+    state = library.get_state()
+    active_ids = list_active_broadcast_ids(channel)
+
+    preserved_id = ""
+    if has_complete_persisted_event(state):
+        preserved_id = state.get("broadcast_id", "")
+
+    ids_to_finish = [
+        broadcast_id
+        for broadcast_id in active_ids
+        if broadcast_id != preserved_id
+    ]
+
+    results = finish_broadcast_ids(channel, ids_to_finish)
+
+    if preserved_id:
+        state.update(
+            {
+                "running": False,
+                "current_track": "",
+                "track_index": 0,
+                "last_error": "",
+            }
+        )
+        library.save_state(state)
+    else:
+        clear_local_event_state(channel)
+
+    return {
+        "preserved_broadcast_id": preserved_id,
+        "closed": results,
+    }
 
 def remove_runtime_flags(channel):
     for suffix in (
         "running",
         "cycle_waiting",
     ):
-        path = (
-            RUNTIME_DIR
-            / f"{channel}.{suffix}"
-        )
+        path = RUNTIME_DIR / f"{channel}.{suffix}"
 
         try:
             path.unlink()
@@ -118,10 +148,7 @@ def graceful_stop(channel, main_pid, timeout=75):
 
     deadline = time.monotonic() + timeout
 
-    while (
-        process_exists(main_pid)
-        and time.monotonic() < deadline
-    ):
+    while process_exists(main_pid) and time.monotonic() < deadline:
         time.sleep(1)
 
     if process_exists(main_pid):
@@ -133,32 +160,34 @@ def graceful_stop(channel, main_pid, timeout=75):
         return 1
 
     print(
-        f"[{channel}] Worker stopped gracefully.",
+        f"[{channel}] Worker stopped gracefully. "
+        "YouTube event state preserved.",
         flush=True,
     )
     return 0
 
 
 def prestart_guard(channel):
-    results = finish_active_broadcasts(
-        channel
-    )
+    result = prepare_for_worker_start(channel)
 
     remove_runtime_flags(channel)
 
+    preserved_id = result["preserved_broadcast_id"]
+    closed = result["closed"]
+
     print(
         f"[{channel}] Pre-start guard finished. "
-        f"Closed active broadcasts: "
-        f"{len(results)}.",
+        f"Preserved broadcast: {preserved_id or 'none'}. "
+        f"Closed duplicate broadcasts: {len(closed)}.",
         flush=True,
     )
 
-    for result in results:
+    for item in closed:
         print(
             f"[{channel}] "
-            f"{result['broadcast_id']} | "
-            f"{result['action']} | "
-            f"{result['status']}",
+            f"{item['broadcast_id']} | "
+            f"{item['action']} | "
+            f"{item['status']}",
             flush=True,
         )
 
@@ -176,27 +205,13 @@ def main():
     channel = sys.argv[2]
 
     if action == "prestart":
-        raise SystemExit(
-            prestart_guard(channel)
-        )
+        raise SystemExit(prestart_guard(channel))
 
     if action == "stop":
-        main_pid = (
-            int(sys.argv[3])
-            if len(sys.argv) >= 4
-            else 0
-        )
+        main_pid = int(sys.argv[3]) if len(sys.argv) >= 4 else 0
+        raise SystemExit(graceful_stop(channel, main_pid))
 
-        raise SystemExit(
-            graceful_stop(
-                channel,
-                main_pid,
-            )
-        )
-
-    raise SystemExit(
-        f"Unknown action: {action}"
-    )
+    raise SystemExit(f"Unknown action: {action}")
 
 
 if __name__ == "__main__":

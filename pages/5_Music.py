@@ -1,66 +1,280 @@
+from pathlib import Path
+
 import streamlit as st
 
-st.set_page_config(page_title="Музыка", page_icon="🎵")
+from app.services.track_library import (
+    GENRES,
+    MOODS,
+    SUBGENRES_BY_GENRE,
+    TrackLibrary,
+)
 
-st.title("🎵 Источники музыки")
+
+st.set_page_config(
+    page_title="Музыка",
+    page_icon="🎵",
+    layout="wide",
+)
+
+st.title("🎵 Библиотека музыки")
+
+library_root = Path("/opt/youtubefactory/library")
+
+channels = sorted(
+    item.name
+    for item in library_root.iterdir()
+    if item.is_dir()
+)
+
+if not channels:
+    st.warning("Нет каналов.")
+    st.stop()
+
+channel = st.selectbox(
+    "Канал",
+    channels,
+)
+
+track_library = TrackLibrary(channel)
 
 st.divider()
+st.subheader("Загрузка треков")
 
-if "music_sources" not in st.session_state:
-    st.session_state.music_sources = []
+genre = st.selectbox(
+    "Жанр",
+    GENRES,
+)
 
-with st.form("music_form"):
+subgenre = st.selectbox(
+    "Поджанр",
+    SUBGENRES_BY_GENRE[genre],
+)
 
-    name = st.text_input("Название")
+mood = st.selectbox(
+    "Настроение",
+    MOODS,
+)
 
-    provider = st.selectbox(
-        "Источник",
-        [
-            "Suno",
-            "YouTube Audio Library",
-            "Локальная папка",
-            "Другое",
-        ],
+col_artist, col_bpm = st.columns(2)
+
+with col_artist:
+    artist = st.text_input(
+        "Исполнитель",
+        value="",
+        help="Необязательно. Можно оставить пустым.",
     )
 
-    style = st.text_input("Стиль музыки")
+with col_bpm:
+    bpm = st.number_input(
+        "BPM",
+        min_value=0,
+        max_value=300,
+        value=0,
+        step=1,
+        help="0 — не указывать BPM.",
+    )
 
-    prompt = st.text_area("Промпт")
+uploaded_files = st.file_uploader(
+    "Выбери один или несколько треков",
+    type=["mp3", "wav", "m4a", "aac", "flac"],
+    accept_multiple_files=True,
+)
 
-    submit = st.form_submit_button("Добавить")
+if st.button(
+    "Загрузить треки",
+    type="primary",
+    use_container_width=True,
+    disabled=not uploaded_files,
+):
+    results = track_library.upload_tracks(
+        uploaded_files=uploaded_files,
+        genre=genre,
+        subgenre=subgenre,
+        mood=mood,
+        artist=artist,
+        bpm=bpm or None,
+    )
 
-    if submit:
+    uploaded_count = sum(
+        1
+        for item in results
+        if item.get("ok") and not item.get("duplicate")
+    )
+    duplicate_count = sum(
+        1
+        for item in results
+        if item.get("duplicate")
+    )
+    error_items = [
+        item
+        for item in results
+        if not item.get("ok")
+    ]
 
-        st.session_state.music_sources.append(
-            {
-                "name": name,
-                "provider": provider,
-                "style": style,
-                "prompt": prompt,
-            }
+    if uploaded_count:
+        st.success(
+            f"Загружено треков: {uploaded_count}"
         )
 
-        st.success("Источник музыки добавлен")
+    if duplicate_count:
+        st.warning(
+            f"Пропущено дубликатов: {duplicate_count}"
+        )
+
+    for item in error_items:
+        st.error(
+            f"{item['filename']}: {item['error']}"
+        )
+
+    if uploaded_count:
+        st.rerun()
 
 st.divider()
+st.subheader("Треки канала")
 
-st.subheader("Добавленные источники")
+tracks = track_library.list_tracks()
 
-if not st.session_state.music_sources:
+if not tracks:
+    st.info("На этом канале пока нет треков.")
+    st.stop()
 
-    st.info("Источников музыки пока нет.")
+st.caption(
+    f"Всего треков: {len(tracks)}"
+)
 
-else:
+for index, item in enumerate(tracks):
+    audio_path = item["audio_path"]
+    metadata = item["metadata"]
 
-    for music in st.session_state.music_sources:
+    title = metadata.get("title") or audio_path.stem
+    subgenre_value = metadata.get("subgenre") or "Без поджанра"
+    mood_value = metadata.get("mood") or "Без настроения"
 
-        with st.container(border=True):
+    with st.expander(
+        f"{title} · {subgenre_value} · {mood_value}"
+    ):
+        st.audio(str(audio_path))
 
-            st.write(f"### {music['name']}")
+        col1, col2, col3 = st.columns(3)
 
-            st.write(f"Источник: {music['provider']}")
+        with col1:
+            edit_genre = st.selectbox(
+                "Жанр",
+                GENRES,
+                index=(
+                    GENRES.index(metadata["genre"])
+                    if metadata.get("genre") in GENRES
+                    else 0
+                ),
+                key=f"genre_{channel}_{index}",
+            )
 
-            st.write(f"Стиль: {music['style']}")
+        available_subgenres = SUBGENRES_BY_GENRE[
+            edit_genre
+        ]
 
-            if music["prompt"]:
-                st.code(music["prompt"])
+        with col2:
+            edit_subgenre = st.selectbox(
+                "Поджанр",
+                available_subgenres,
+                index=(
+                    available_subgenres.index(
+                        metadata["subgenre"]
+                    )
+                    if metadata.get("subgenre")
+                    in available_subgenres
+                    else 0
+                ),
+                key=f"subgenre_{channel}_{index}",
+            )
+
+        with col3:
+            edit_mood = st.selectbox(
+                "Настроение",
+                MOODS,
+                index=(
+                    MOODS.index(metadata["mood"])
+                    if metadata.get("mood") in MOODS
+                    else 0
+                ),
+                key=f"mood_{channel}_{index}",
+            )
+
+        col4, col5, col6 = st.columns(3)
+
+        with col4:
+            edit_title = st.text_input(
+                "Название трека",
+                value=title,
+                key=f"title_{channel}_{index}",
+            )
+
+        with col5:
+            edit_artist = st.text_input(
+                "Исполнитель",
+                value=metadata.get("artist", ""),
+                key=f"artist_{channel}_{index}",
+            )
+
+        with col6:
+            edit_bpm = st.number_input(
+                "BPM",
+                min_value=0,
+                max_value=300,
+                value=int(metadata.get("bpm") or 0),
+                step=1,
+                key=f"bpm_{channel}_{index}",
+            )
+
+        live_enabled = st.checkbox(
+            "Использовать в LIVE",
+            value=bool(
+                metadata.get("live_enabled", True)
+            ),
+            key=f"live_{channel}_{index}",
+        )
+
+        vod_enabled = st.checkbox(
+            "Использовать в VOD",
+            value=bool(
+                metadata.get("vod_enabled", True)
+            ),
+            key=f"vod_{channel}_{index}",
+        )
+
+        save_col, delete_col = st.columns(2)
+
+        with save_col:
+            if st.button(
+                "Сохранить метаданные",
+                use_container_width=True,
+                key=f"save_{channel}_{index}",
+            ):
+                track_library.save_metadata(
+                    audio_path,
+                    {
+                        "title": edit_title.strip()
+                        or audio_path.stem,
+                        "artist": edit_artist.strip(),
+                        "genre": edit_genre,
+                        "subgenre": edit_subgenre,
+                        "mood": edit_mood,
+                        "bpm": edit_bpm or None,
+                        "live_enabled": live_enabled,
+                        "vod_enabled": vod_enabled,
+                    },
+                )
+                st.success("Метаданные сохранены.")
+                st.rerun()
+
+        with delete_col:
+            if st.button(
+                "Удалить трек",
+                use_container_width=True,
+                key=f"delete_{channel}_{index}",
+            ):
+                track_library.delete_track(
+                    audio_path
+                )
+                st.success("Трек удалён.")
+                st.rerun()
