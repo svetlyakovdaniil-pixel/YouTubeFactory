@@ -135,35 +135,12 @@ class VODScheduleService:
                         "названий."
                     )
 
-                description_template = str(
+                if not str(
                     item.get(
                         "description_template",
                         "",
                     )
-                    or ""
-                ).strip()
-                description_blocks = item.get(
-                    "description_blocks",
-                    {},
-                )
-                has_description_blocks = (
-                    isinstance(description_blocks, dict)
-                    and any(
-                        isinstance(values, list)
-                        and any(
-                            str(value).strip()
-                            for value in values
-                        )
-                        for values in (
-                            description_blocks.values()
-                        )
-                    )
-                )
-
-                if (
-                    not description_template
-                    and not has_description_blocks
-                ):
+                ).strip():
                     raise ValueError(
                         f"{day}: отсутствует описание."
                     )

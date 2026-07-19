@@ -20,6 +20,22 @@ class VODPublisher:
             channel_name
         )
 
+    def _utc_now(self):
+        return datetime.now(
+            timezone.utc
+        ).isoformat()
+
+    def _save_state(
+        self,
+        **updates,
+    ):
+        state = self.library.get_vod_state()
+        state.update(updates)
+        self.library.save_vod_state(
+            state
+        )
+        return state
+
     def _build_tracklist(self, manifest):
         lines = []
 
@@ -128,27 +144,61 @@ class VODPublisher:
 
         return result
 
-    def publish(
+    def _validate_render_result(
         self,
-        plan,
         render_result,
     ):
-        if not plan.get("ready"):
+        if not isinstance(
+            render_result,
+            dict,
+        ):
+            raise TypeError(
+                "Результат рендера VOD "
+                "должен быть словарём."
+            )
+
+        output_value = str(
+            render_result.get(
+                "output_path",
+                "",
+            )
+        ).strip()
+        manifest_value = render_result.get(
+            "manifest"
+        )
+        manifest_path_value = str(
+            render_result.get(
+                "manifest_path",
+                "",
+            )
+        ).strip()
+
+        if not output_value:
             raise RuntimeError(
-                "VOD-план не готов: "
-                f"{plan.get('reason', '')}"
+                "В результате рендера отсутствует "
+                "output_path."
+            )
+
+        if not isinstance(
+            manifest_value,
+            dict,
+        ):
+            raise RuntimeError(
+                "В результате рендера отсутствует "
+                "корректный manifest."
+            )
+
+        if not manifest_path_value:
+            raise RuntimeError(
+                "В результате рендера отсутствует "
+                "manifest_path."
             )
 
         output_path = Path(
-            render_result["output_path"]
+            output_value
         )
-        manifest = render_result[
-            "manifest"
-        ]
         manifest_path = Path(
-            render_result[
-                "manifest_path"
-            ]
+            manifest_path_value
         )
 
         if not output_path.exists():
@@ -157,15 +207,91 @@ class VODPublisher:
                 f"не найдено: {output_path}"
             )
 
-        thumbnail_path = Path(
-            plan["thumbnail"]
+        if not output_path.is_file():
+            raise RuntimeError(
+                "Путь итогового VOD-видео "
+                f"не является файлом: {output_path}"
+            )
+
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                "Файл манифеста VOD "
+                f"не найден: {manifest_path}"
+            )
+
+        return (
+            output_path,
+            manifest_value,
+            manifest_path,
         )
+
+    def publish(
+        self,
+        plan,
+        render_result,
+    ):
+        if not isinstance(
+            plan,
+            dict,
+        ):
+            raise TypeError(
+                "VOD-план должен быть словарём."
+            )
+
+        if not plan.get("ready"):
+            raise RuntimeError(
+                "VOD-план не готов: "
+                f"{plan.get('reason', '')}"
+            )
+
+        (
+            output_path,
+            manifest,
+            manifest_path,
+        ) = self._validate_render_result(
+            render_result
+        )
+
+        thumbnail_value = str(
+            plan.get(
+                "thumbnail",
+                "",
+            )
+        ).strip()
+
+        if not thumbnail_value:
+            raise RuntimeError(
+                "В VOD-плане отсутствует thumbnail."
+            )
+
+        thumbnail_path = Path(
+            thumbnail_value
+        )
+
+        if not thumbnail_path.exists():
+            raise FileNotFoundError(
+                "Превью VOD не найдено: "
+                f"{thumbnail_path}"
+            )
+
+        if not thumbnail_path.is_file():
+            raise RuntimeError(
+                "Путь превью VOD не является "
+                f"файлом: {thumbnail_path}"
+            )
+
         title = str(
             plan.get(
                 "title",
                 "",
             )
         ).strip()
+
+        if not title:
+            raise RuntimeError(
+                "В VOD-плане отсутствует title."
+            )
+
         description = (
             self._build_description(
                 plan.get(
@@ -180,21 +306,22 @@ class VODPublisher:
                 "privacy",
                 "public",
             )
-        ).strip()
+        ).strip() or "public"
         tags = self._build_tags(
             plan
         )
 
-        state = self.library.get_vod_state()
-        state.update(
-            {
-                "running": True,
-                "stage": "uploading",
-                "last_error": "",
-            }
-        )
-        self.library.save_vod_state(
-            state
+        self._save_state(
+            running=True,
+            stage="uploading",
+            started_at=self._utc_now(),
+            finished_at="",
+            output_file=str(
+                output_path
+            ),
+            youtube_video_id="",
+            youtube_url="",
+            last_error="",
         )
 
         try:
@@ -212,25 +339,53 @@ class VODPublisher:
                 )
             )
 
-            video_id = upload_result[
-                "video_id"
-            ]
-            youtube_url = upload_result[
-                "youtube_url"
-            ]
-            published_at = datetime.now(
-                timezone.utc
-            ).isoformat()
+            if not isinstance(
+                upload_result,
+                dict,
+            ):
+                raise RuntimeError(
+                    "YouTube uploader вернул "
+                    "некорректный результат."
+                )
+
+            video_id = str(
+                upload_result.get(
+                    "video_id",
+                    "",
+                )
+            ).strip()
+            youtube_url = str(
+                upload_result.get(
+                    "youtube_url",
+                    "",
+                )
+            ).strip()
+
+            if not video_id:
+                raise RuntimeError(
+                    "YouTube uploader не вернул "
+                    "video_id."
+                )
+
+            if not youtube_url:
+                raise RuntimeError(
+                    "YouTube uploader не вернул "
+                    "youtube_url."
+                )
+
+            published_at = self._utc_now()
 
             used_paths = (
                 self._used_track_paths(
                     manifest
                 )
             )
-            self.tracks.mark_vod_used(
-                audio_paths=used_paths,
-                publication_id=video_id,
-            )
+
+            if used_paths:
+                self.tracks.mark_vod_used(
+                    audio_paths=used_paths,
+                    publication_id=video_id,
+                )
 
             history_item = {
                 "channel": self.channel_name,
@@ -299,31 +454,20 @@ class VODPublisher:
                 )
                 deleted_output = True
 
-            state.update(
-                {
-                    "running": False,
-                    "stage": "published",
-                    "finished_at": (
-                        published_at
-                    ),
-                    "output_file": (
-                        ""
-                        if deleted_output
-                        else str(
-                            output_path
-                        )
-                    ),
-                    "youtube_video_id": (
-                        video_id
-                    ),
-                    "youtube_url": (
-                        youtube_url
-                    ),
-                    "last_error": "",
-                }
-            )
-            self.library.save_vod_state(
-                state
+            self._save_state(
+                running=False,
+                stage="published",
+                finished_at=published_at,
+                output_file=(
+                    ""
+                    if deleted_output
+                    else str(
+                        output_path
+                    )
+                ),
+                youtube_video_id=video_id,
+                youtube_url=youtube_url,
+                last_error="",
             )
 
             return {
@@ -348,17 +492,13 @@ class VODPublisher:
             }
 
         except Exception as error:
-            state.update(
-                {
-                    "running": False,
-                    "stage": "upload_error",
-                    "finished_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                    "last_error": str(error),
-                }
-            )
-            self.library.save_vod_state(
-                state
+            self._save_state(
+                running=False,
+                stage="upload_error",
+                finished_at=self._utc_now(),
+                output_file=str(
+                    output_path
+                ),
+                last_error=str(error),
             )
             raise

@@ -1798,90 +1798,20 @@ with tab_vod:
                 ),
             )
 
-            st.markdown("#### Генератор описания")
-            st.caption(
-                "При публикации система случайно выберет "
-                "по одному варианту из каждого блока. "
-                "Один вариант — одна строка."
-            )
-
-            description_blocks = item.get(
-                "description_blocks",
-                {},
-            )
-            if not isinstance(description_blocks, dict):
-                description_blocks = {}
-
-            intro_text = st.text_area(
-                "Вступления",
-                value="\n".join(
-                    description_blocks.get("intro", [])
-                ),
-                height=110,
-                key=(
-                    f"vod_description_intro_"
-                    f"{selected_channel}_{day}"
-                ),
-            )
-            genre_text = st.text_area(
-                "Описание звучания и поджанра",
-                value="\n".join(
-                    description_blocks.get("genre", [])
-                ),
-                height=130,
-                key=(
-                    f"vod_description_genre_"
-                    f"{selected_channel}_{day}"
-                ),
-            )
-            usage_text = st.text_area(
-                "Для чего подходит",
-                value="\n".join(
-                    description_blocks.get("usage", [])
-                ),
-                height=110,
-                key=(
-                    f"vod_description_usage_"
-                    f"{selected_channel}_{day}"
-                ),
-            )
-            cta_text = st.text_area(
-                "Призыв к действию",
-                value="\n".join(
-                    description_blocks.get("cta", [])
-                ),
-                height=100,
-                key=(
-                    f"vod_description_cta_"
-                    f"{selected_channel}_{day}"
-                ),
-            )
-            hashtags_text = st.text_area(
-                "Хэштеги",
-                value="\n".join(
-                    description_blocks.get("hashtags", [])
-                ),
-                height=100,
-                key=(
-                    f"vod_description_hashtags_"
-                    f"{selected_channel}_{day}"
-                ),
-            )
-
             description_text = st.text_area(
-                "Старое цельное описание (резерв)",
+                "Описание",
                 value=item.get(
                     "description_template",
                     "",
                 ),
-                height=100,
+                height=150,
                 help=(
-                    "Используется только если блоки выше "
-                    "пустые. {tracklist} можно оставить "
-                    "для обратной совместимости."
+                    "Используй {tracklist}, "
+                    "чтобы вставить треклист "
+                    "с таймкодами."
                 ),
                 key=(
-                    f"vod_description_legacy_"
+                    f"vod_description_"
                     f"{selected_channel}_{day}"
                 ),
             )
@@ -2069,33 +1999,6 @@ with tab_vod:
                     "description_template": (
                         description_text.strip()
                     ),
-                    "description_blocks": {
-                        "intro": [
-                            line.strip()
-                            for line in intro_text.splitlines()
-                            if line.strip()
-                        ],
-                        "genre": [
-                            line.strip()
-                            for line in genre_text.splitlines()
-                            if line.strip()
-                        ],
-                        "usage": [
-                            line.strip()
-                            for line in usage_text.splitlines()
-                            if line.strip()
-                        ],
-                        "cta": [
-                            line.strip()
-                            for line in cta_text.splitlines()
-                            if line.strip()
-                        ],
-                        "hashtags": [
-                            line.strip()
-                            for line in hashtags_text.splitlines()
-                            if line.strip()
-                        ],
-                    },
                     "profile_key": (
                         saved_profile_key
                     ),
