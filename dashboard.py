@@ -20,7 +20,10 @@ from app.services.preflight_manager import format_preflight_report
 from app.services.server_diagnostics import format_server_diagnostics
 from app.services.maintenance_manager import list_backups, run_maintenance, format_maintenance_report
 from app.services.metadata_manager import ensure_metadata_templates, templates_to_text, text_to_templates
-from app.services.media_pipeline import prepare_loop_video
+from app.services.media_pipeline import (
+    prepare_loop_video,
+    prepare_vod_loop_video,
+)
 from app.services.track_library import TrackLibrary
 from app.services.vod_schedule_service import VODScheduleService
 from app.services.channel_library import WEEK_DAYS
@@ -1935,7 +1938,7 @@ with tab_vod:
                     created = 0
 
                     for uploaded in loop_uploads:
-                        _, is_created = (
+                        saved_path, is_created = (
                             save_uploaded_file(
                                 uploaded,
                                 profile[
@@ -1943,6 +1946,14 @@ with tab_vod:
                                 ],
                             )
                         )
+
+                        if is_created:
+                            prepare_vod_loop_video(
+                                channel_name=selected_channel,
+                                profile_key=profile_key,
+                                source_path=saved_path,
+                            )
+
                         created += int(
                             is_created
                         )
@@ -2108,7 +2119,7 @@ with tab_vod:
                     for uploaded in (
                         loop_uploads or []
                     ):
-                        _, is_created = (
+                        saved_path, is_created = (
                             save_uploaded_file(
                                 uploaded,
                                 saved_profile[
@@ -2116,6 +2127,14 @@ with tab_vod:
                                 ],
                             )
                         )
+
+                        if is_created:
+                            prepare_vod_loop_video(
+                                channel_name=selected_channel,
+                                profile_key=saved_profile_key,
+                                source_path=saved_path,
+                            )
+
                         uploaded_loops += int(
                             is_created
                         )
